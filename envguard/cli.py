@@ -1,111 +1,125 @@
-"""Command-line interface for envguard.
-
-Provides the main entry point and argument parsing for the envguard CLI tool.
-Users can compare .env files across environments and output results in
-different formats.
-"""
+"""CLI entry point for envguard."""
 
 import argparse
+import json
 import sys
-from pathlib import Path
+from typing import List, Optional
 
-from envguard.comparator import compare_envs
 from envguard.parser import parse_env_file
-from envguard.reporter import OutputFormat, report_json, report_text
+from envguard.comparator import compare_envs
+from envguard.reporter import report_text, report_json, OutputFormat
+from envguard.validator import validate_env
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Build and return the argument parser for the CLI."""
     parser = argparse.ArgumentParser(
         prog="envguard",
-        description=(
-            "Validate and diff .env files across environments to catch "
-            "missing or mismatched variables before deployment."
-        ),
+        description="Validate and diff .env files across environments.",
     )
+    subparsers = parser.add_subparsers(dest="command", required=True)
 
-    parser.add_argument(
-        "source",
-        metavar="SOURCE",
-        help="Path to the reference .env file (e.g. .env.example).",
-    )
-    parser.add_argument(
-        "target",
-        metavar="TARGET",
-        help="Path to the target .env file to validate against the source.",
-    )
-    parser.add_argument(
+    # --- diff command ---
+    diff_cmd = subparsers.add_parser("diff", help="Compare two .env files.")
+    diff_cmd.add_argument("source", help="Source .env file (reference).")
+    diff_cmd.add_argument("target", help="Target .env file to compare against.")
+    diff_cmd.add_argument(
         "--ignore-values",
         action="store_true",
-        default=False,
-        help=(
-            "Only check for key presence; skip value mismatch reporting. "
-            "Useful when comparing an example file that has placeholder values."
-        ),
+        help="Only check for missing/extra keys, not value differences.",
     )
-    parser.add_argument(
+    diff_cmd.add_argument(
         "--format",
-        choices=[f.value for f in OutputFormat],
-        default=OutputFormat.TEXT.value,
+        choices=["text", "json"],
+        default="text",
         dest="output_format",
-        help="Output format for the comparison report (default: text).",
+        help="Output format (default: text).",
     )
-    parser.add_argument(
-        "--no-color",
+    diff_cmd.add_argument(
+        "--no-color", action="store_true", help="Disable colored output."
+    )
+
+    # --- validate command ---
+    val_cmd = subparsers.add_parser("validate", help="Validate a .env file.")
+    val_cmd.add_argument("envfile", help="The .env file to validate.")
+    val_cmd.add_argument(
+        "--require",
+        nargs="+",
+        metavar="KEY",
+        help="Keys that must be present.",
+    )
+    val_cmd.add_argument(
+        "--pattern",
+        nargs="+",
+        metavar="KEY=TYPE",
+        help="Value format checks, e.g. DATABASE_URL=url PORT=port.",
+    )
+    val_cmd.add_argument(
+        "--allow-empty",
         action="store_true",
-        default=False,
-        help="Disable ANSI color codes in text output.",
+        help="Allow keys with empty values without warning.",
+    )
+    val_cmd.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        dest="output_format",
     )
 
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
-    """Run envguard and return an exit code.
+def _parse_key_patterns(pattern_args: Optional[List[str]]) -> dict:
+    patterns = {}
+    if not pattern_args:
+        return patterns
+    for item in pattern_args:
+        if "=" not in item:
+            print(f"Warning: ignoring malformed --pattern argument: {item!r}", file=sys.stderr)
+            continue
+        key, _, ptype = item.partition("=")
+        patterns[key.strip()] = ptype.strip()
+    return patterns
 
-    Returns:
-        0 if no differences were found.
-        1 if differences were detected or an error occurred.
-    """
+
+def main(argv: Optional[List[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    source_path = Path(args.source)
-    target_path = Path(args.target)
+    if args.command == "diff":
+        source_env = parse_env_file(args.source)
+        target_env = parse_env_file(args.target)
+        result = compare_envs(source_env, target_env, ignore_values=args.ignore_values)
+        fmt = OutputFormat.JSON if args.output_format == "json" else OutputFormat.TEXT
+        if fmt == OutputFormat.JSON:
+            print(report_json(result))
+        else:
+            print(report_text(result, use_color=not args.no_color))
+        return 0 if not result.has_differences else 1
 
-    # Validate that both files exist before attempting to parse them.
-    for path in (source_path, target_path):
-        if not path.exists():
-            print(f"envguard: error: file not found: {path}", file=sys.stderr)
-            return 1
-        if not path.is_file():
-            print(f"envguard: error: not a file: {path}", file=sys.stderr)
-            return 1
+    if args.command == "validate":
+        env = parse_env_file(args.envfile)
+        key_patterns = _parse_key_patterns(getattr(args, "pattern", None))
+        val_result = validate_env(
+            env,
+            required_keys=args.require,
+            key_patterns=key_patterns or None,
+            allow_empty_values=args.allow_empty,
+        )
+        if args.output_format == "json":
+            data = {
+                "valid": val_result.is_valid,
+                "errors": [str(i) for i in val_result.errors],
+                "warnings": [str(i) for i in val_result.warnings],
+            }
+            print(json.dumps(data, indent=2))
+        else:
+            if not val_result.issues:
+                print("✔ No issues found.")
+            for issue in val_result.issues:
+                print(str(issue))
+        return 0 if val_result.is_valid else 1
 
-    try:
-        source_vars = parse_env_file(source_path)
-        target_vars = parse_env_file(target_path)
-    except OSError as exc:
-        print(f"envguard: error: {exc}", file=sys.stderr)
-        return 1
-
-    result = compare_envs(
-        source_vars,
-        target_vars,
-        ignore_values=args.ignore_values,
-    )
-
-    output_format = OutputFormat(args.output_format)
-
-    if output_format == OutputFormat.JSON:
-        print(report_json(result))
-    else:
-        use_color = not args.no_color
-        print(report_text(result, color=use_color))
-
-    # Exit with a non-zero status when differences are found so that CI
-    # pipelines can treat a failed comparison as a build failure.
-    return 1 if result.has_differences() else 0
+    return 0
 
 
 if __name__ == "__main__":

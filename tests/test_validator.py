@@ -94,6 +94,21 @@ def test_combined_required_and_pattern():
         required_keys=["PORT", "HOST"],
         key_patterns={"PORT": "port"},
     )
+    assert not result.is_valid
     error_keys = {i.key for i in result.errors}
-    assert "HOST" in error_keys   # missing
-    assert "PORT" in error_keys   # bad format
+    assert "HOST" in error_keys
+    assert "PORT" in error_keys
+
+
+def test_validation_result_error_and_warning_counts():
+    """ValidationResult should correctly report counts of errors and warnings."""
+    env = {"PORT": "bad", "HOST": ""}
+    result = validate_env(
+        env,
+        required_keys=["PORT", "HOST", "SECRET_KEY"],
+        key_patterns={"PORT": "port"},
+        allow_empty_values=False,
+    )
+    assert not result.is_valid
+    assert len(result.errors) >= 2  # PORT pattern + SECRET_KEY missing
+    assert len(result.warnings) == 1  # HOST empty

@@ -49,6 +49,19 @@ class EnvDiff:
     def changed(self) -> List[DiffEntry]:
         return [e for e in self.entries if e.status == "changed"]
 
+    def summary(self) -> str:
+        """Return a short human-readable summary of the diff."""
+        if not self.has_changes:
+            return "No differences found."
+        parts = []
+        if self.added:
+            parts.append(f"{len(self.added)} added")
+        if self.removed:
+            parts.append(f"{len(self.removed)} removed")
+        if self.changed:
+            parts.append(f"{len(self.changed)} changed")
+        return ", ".join(parts) + "."
+
 
 def diff_env_files(
     source_path: str,

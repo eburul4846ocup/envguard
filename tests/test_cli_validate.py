@@ -73,3 +73,9 @@ def test_validate_json_output_valid(env_file, capsys):
     data = json.loads(captured.out)
     assert data["valid"] is True
     assert data["errors"] == []
+
+
+def test_validate_nonexistent_file_exits_nonzero(tmp_path):
+    """Validate that a missing .env file produces a non-zero exit code."""
+    missing_path = str(tmp_path / "nonexistent.env")
+    assert main(["validate", missing_path]) != 0
